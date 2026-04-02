@@ -2253,6 +2253,29 @@ h1,h2,h3,h4,h5,h6{font-weight:600;letter-spacing:-.025em}
 
     function quickMatchPatient(pid,pname,btn){switchTab('matches');setTimeout(function(){runSingleMatch(pid,pname,null);},200);}
 
+  function setMatchLoading(on, msg) {
+    var loading = document.getElementById('match-loading');
+    var idle    = document.getElementById('match-idle');
+    var bar     = document.getElementById('match-progress-bar');
+    var text    = document.getElementById('match-progress-text');
+    if (loading) loading.style.display = on ? '' : 'none';
+    if (idle)    idle.style.display    = on ? 'none' : '';
+    if (bar)     bar.style.width       = on ? '0%' : '100%';
+    if (text && msg) text.textContent  = msg || '';
+  }
+
+  function showMatchError(msg) {
+    setMatchLoading(false);
+    var results = document.getElementById('match-results');
+    if (results) results.innerHTML =
+      '<div class="data-card">'
+      + '<div class="d-flex align-items-center gap-2" style="color:var(--status-error)">'
+      + '<i class="bi bi-exclamation-circle-fill"></i>'
+      + '<span class="fw-semibold">Matching failed</span></div>'
+      + '<p style="color:var(--muted-fg);font-size:.825rem;margin:.5rem 0 0">' + escHtml(msg) + '</p>'
+      + '</div>';
+  }
+
   async function runAllMatches(btn){
     var patients;
     try{patients=await apiCall('GET','/patients');}catch(e){showMatchError('Could not load patients: '+e.message);return;}
