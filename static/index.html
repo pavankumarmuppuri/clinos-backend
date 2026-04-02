@@ -1384,44 +1384,26 @@ h1,h2,h3,h4,h5,h6{font-weight:600;letter-spacing:-.025em}
       return { role: String(m.role || 'user'), content: String(m.content || '') };
     });
 
-    // Call Gemini directly from browser — no backend needed
-    const GEMINI_KEY = 'AIzaSyCFwHPdH8aM36iLKyBNOO0-2qjFTpeDpHc';
-    const geminiUrl  = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + GEMINI_KEY;
-
-    // Build Gemini conversation
-    const geminiContents = [
-      { role: 'user',  parts: [{ text: systemPrompt }] },
-      { role: 'model', parts: [{ text: 'Understood. I am TrialMatch AI, ready to help.' }] }
-    ];
-    msgsToSend.forEach(function(m) {
-      geminiContents.push({
-        role: m.role === 'user' ? 'user' : 'model',
-        parts: [{ text: m.content }]
-      });
-    });
-
-    // Retry up to 2 times on 429
-    async function callGemini(retries) {
-      const res  = await fetch(geminiUrl, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: geminiContents,
-          generationConfig: { temperature: 0.7, maxOutputTokens: 600, thinkingConfig: {thinkingBudget: 0} }
-        })
-      });
-      if (res.status === 429 && retries > 0) {
-        await new Promise(function(r){ setTimeout(r, 3000); });
-        return callGemini(retries - 1);
-      }
-      return res.json();
-    }
-
+    // Call backend /api/match/chat — Gemini key stays on server
     try {
-      const data  = await callGemini(2);
-      const reply = data.candidates && data.candidates[0]
-        ? data.candidates[0].content.parts[0].text
-        : 'Sorry, could not get a response.';
+      const chatPayload = {
+        messages:       msgsToSend,
+        system_prompt:  systemPrompt,
+        patient_context: patientSummary
+      };
+      const res   = await fetch('/api/match/chat', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + jwtToken },
+        body:    JSON.stringify(chatPayload)
+      });
+      if (res.status === 429) {
+        document.getElementById(tid)?.remove();
+        msgs.innerHTML += '<div class="copilot-bubble bot">Too many requests — please wait a moment.</div>';
+        msgs.scrollTop = msgs.scrollHeight;
+        return;
+      }
+      const data  = await res.json();
+      const reply = data.reply || 'Sorry, could not get a response.';
       document.getElementById(tid)?.remove();
       msgs.innerHTML += `<div class="copilot-bubble bot">${escHtml(reply)}</div>`;
       msgs.scrollTop = msgs.scrollHeight;
@@ -2419,229 +2401,41 @@ h1,h2,h3,h4,h5,h6{font-weight:600;letter-spacing:-.025em}
   }
 
   async function geminiRerank(patient, candidates, cancerType, stage, ecog, biomarkers, notes) {
-    var GEMINI_KEY = 'AIzaSyCFwHPdH8aM36iLKyBNOO0-2qjFTpeDpHc';
-    var geminiUrl  = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=' + GEMINI_KEY;
+    // All Gemini calls go through backend — key stays secure on server
+    var bmList     = patient.biomarkers || [];
+    var biomarkers_str = bmList.map(function(b){ return b.name+' '+b.value; }).join(', ');
+    var notes_str  = patient.diagnosis_description || patient.additional_notes || '';
 
-    var patientText = 'Patient: ' + (patient.name||'Unknown')
-      + ', ' + cancerType + (stage ? ', '+stage : '')
-      + (ecog ? ', ECOG '+ecog : '')
-      + (biomarkers ? ', Biomarkers: '+biomarkers : '')
-      + (notes ? ', Notes: '+notes.slice(0,300) : '');
+    var payload = {
+      patient_id:   String(patient.id || ''),
+      patient_name: patient.name || '',
+      cancer_type:  cancerType || patient.cancer_type || 'cancer',
+      stage:        stage || patient.stage || '',
+      ecog:         ecog || String(patient.ecog_status || ''),
+      biomarkers:   biomarkers || biomarkers_str,
+      notes:        notes || notes_str,
+      trials:       candidates.map(function(t) {
+        return {
+          nct_id:       t.nct_id,
+          title:        t.title,
+          inclusion:    t.inclusion || '',
+          exclusion:    t.exclusion || '',
+          combined_text: t.combined_text || ''
+        };
+      })
+    };
 
-    var trialsText = candidates.map(function(t, i) {
-      return '['+(i+1)+'] NCT: '+t.nct_id+'\nTitle: '+t.title
-        + '\nInclusion: '+(t.inclusion||'').slice(0,400)
-        + '\nExclusion: '+(t.exclusion||'').slice(0,250);
-    }).join('\n\n');
+    var res = await fetch('/api/match/score', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + jwtToken },
+      body:    JSON.stringify(payload)
+    });
 
-    var prompt = 'You are an oncology clinical trial eligibility specialist.\n'
-      + 'Evaluate each trial for this patient and return ONLY valid JSON, no markdown.\n'
-      + 'Format: {"rankings":[{"nct_id":"NCT...","verdict":"ELIGIBLE","confidence":85,'
-      + '"inclusion_met":["criterion1"],"exclusions_triggered":[],"reasoning":"brief reason"}]}\n'
-      + 'Verdicts: ELIGIBLE | POTENTIALLY ELIGIBLE | INELIGIBLE\n\n'
-      + 'PATIENT: ' + patientText + '\n\n'
-      + 'TRIALS:\n' + trialsText;
-
-    // Retry on 429
-    var res, retryCount = 0;
-    while (retryCount < 3) {
-      res = await fetch(geminiUrl, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({
-          contents: [{role:'user', parts:[{text: prompt}]}],
-          generationConfig: {temperature: 0.1, maxOutputTokens: 4000, thinkingConfig: {thinkingBudget: 0}}
-        })
-      });
-      if (res.status === 429) {
-        var wait = 15000 * (retryCount + 1); // 15s, 30s, 45s
-        console.warn('Gemini rerank 429, retrying in ' + (wait/1000) + 's...');
-        await new Promise(function(r){ setTimeout(r, wait); });
-        retryCount++;
-      } else { break; }
-    }
-
+    if (!res.ok) throw new Error('Re-rank request failed: ' + res.status);
     var data = await res.json();
-    if (!data.candidates || !data.candidates[0]) {
-      console.error('Gemini returned no candidates:', JSON.stringify(data));
-      throw new Error('No candidates from Gemini: ' + (data.error ? data.error.message : 'unknown'));
-    }
-    var raw = data.candidates[0].content.parts[0].text;
-    raw = raw.replace(/```json/g,'').replace(/```/g,'').trim();
-    // Find JSON object in response
-    var jsonStart = raw.indexOf('{');
-    var jsonEnd   = raw.lastIndexOf('}');
-    if (jsonStart > -1 && jsonEnd > jsonStart) raw = raw.slice(jsonStart, jsonEnd+1);
-    console.log('Gemini raw:', raw.slice(0,400));
-    var parsed = JSON.parse(raw);
-    console.log('Gemini rankings:', parsed.rankings);
-    var rankings = {};
-    (parsed.rankings||[]).forEach(function(r){ rankings[r.nct_id] = r; });
-
-    var order = {'ELIGIBLE':0,'POTENTIALLY ELIGIBLE':1,'INELIGIBLE':2};
-    var enriched = candidates.map(function(t) {
-      var vd = rankings[t.nct_id] || {};
-      return Object.assign({}, t, {
-        claude_verdict:       vd.verdict        || null,
-        claude_confidence:    vd.confidence     || t.eligibility_pct,
-        inclusion_met:        vd.inclusion_met  || [],
-        exclusions_triggered: vd.exclusions_triggered || [],
-        claude_reasoning:     vd.reasoning      || null,
-        eligibility_pct:      vd.confidence     || t.eligibility_pct,
-        engine: 'gemini+tfidf'
-      });
-    });
-
-    enriched.sort(function(a,b){
-      var oa = order[a.claude_verdict||'INELIGIBLE'] || 2;
-      var ob = order[b.claude_verdict||'INELIGIBLE'] || 2;
-      return oa !== ob ? oa - ob : b.eligibility_pct - a.eligibility_pct;
-    });
-
-    return enriched;
+    return data.top_matches || candidates;
   }
 
-  function renderMatchCard(data,patientName){
-    console.log('renderMatchCard data:', JSON.stringify(data).slice(0,500));
-    if (data.top_matches && data.top_matches[0]) {
-      console.log('First match reasoning:', data.top_matches[0].claude_reasoning);
-      console.log('First match verdict:', data.top_matches[0].claude_verdict);
-    }
-    // Store match count for this patient
-    if (data.patient_id) {
-      var eligCount = (data.top_matches||[]).filter(function(t){
-        return !t.claude_verdict || t.claude_verdict !== 'INELIGIBLE';
-      }).length;
-      patientMatchMap[data.patient_id] = { count: eligCount, topScore: data.top_matches&&data.top_matches[0]?data.top_matches[0].eligibility_pct:0 };
-      // Refresh patient cards to show updated counts
-      var grid = document.getElementById('patients-grid');
-      if (grid && grid.innerHTML && typeof allPatients !== 'undefined' && allPatients.length) {
-        renderPatients(allPatients);
-      }
-    }
-    var container=document.getElementById('match-results');
-    document.getElementById('match-idle').style.display='none';
-    if(!data.top_matches||!data.top_matches.length){
-      container.insertAdjacentHTML('beforeend','<div class="data-card fade-in-up"><p class="fw-semibold mb-1">'+escHtml(patientName)+'</p><p style="color:var(--muted-fg);font-size:.825rem;margin:0"><i class="bi bi-info-circle me-1"></i>No matching trials found ('+data.trials_fetched+' scanned).</p></div>');
-      return;
-    }
-    var eLabel={'tfidf':'<span class="status-badge badge-muted">TF-IDF</span>','embedding':'<span class="status-badge badge-info">PubMedBERT</span>','claude+embedding':'<span class="status-badge badge-success">Claude</span>','gemini+tfidf':'<span class="status-badge badge-success">Gemini AI</span>'}[data.engine_used]||'<span class="status-badge badge-muted">'+escHtml(data.engine_used)+'</span>';
-    var cards=data.top_matches.map(function(t){
-      var pct=t.eligibility_pct||0;
-      var sc=pct>=75?'score-high':pct>=50?'score-medium':'score-low';
-      var vb={'ELIGIBLE':'<span class="status-badge badge-success">Eligible</span>','POTENTIALLY ELIGIBLE':'<span class="status-badge badge-warning">Potentially Eligible</span>','INELIGIBLE':'<span class="status-badge badge-error">Ineligible</span>'}[t.claude_verdict||'']||'';
-      var ir=(t.inclusion_met||[]).map(function(c){return '<div class="criterion-row"><i class="bi bi-check-circle-fill crit-pass me-1"></i><span style="font-size:.8rem">'+escHtml(c)+'</span></div>';}).join('');
-      var er=(t.exclusions_triggered||[]).map(function(c){return '<div class="criterion-row"><i class="bi bi-x-circle-fill crit-fail me-1"></i><span style="font-size:.8rem">'+escHtml(c)+'</span></div>';}).join('');
-      var rr=t.claude_reasoning
-        ?'<div style="background:rgba(13,127,163,.06);border:1px solid rgba(13,127,163,.15);border-radius:10px;padding:.65rem .875rem;margin-top:.5rem;display:flex;align-items:flex-start;gap:.5rem">'
-         +'<i class="bi bi-robot" style="color:var(--primary);font-size:.9rem;flex-shrink:0;margin-top:2px"></i>'
-         +'<div><p style="font-size:.72rem;font-weight:600;color:var(--primary);margin:0 0 .15rem">AI Reasoning</p>'
-         +'<p style="font-size:.8rem;color:var(--muted-fg);margin:0;line-height:1.5">'+escHtml(t.claude_reasoning)+'</p>'
-         +'</div></div>'
-        :'';
-      return '<div class="data-card mt-2 fade-in-up" style="border-left:3px solid var(--primary);border-radius:var(--radius-xl)">'
-        +'<div class="d-flex align-items-start justify-content-between gap-3 mb-2">'
-        +'<div class="d-flex align-items-start gap-3">'
-        +'<div class="score-circle '+sc+'" style="width:48px;height:48px;font-size:.85rem;border-radius:10px">'+pct+'%</div>'
-        +'<div><p class="fw-semibold mb-0" style="font-size:.875rem">'+escHtml(t.title)+'</p>'
-        +'<p style="color:var(--muted-fg);font-size:.75rem;margin:0">'+escHtml(t.nct_id)+'</p></div></div>'
-        +'<div class="d-flex align-items-center gap-2 flex-shrink-0">'+vb
-        +'<a href="https://clinicaltrials.gov/study/'+encodeURIComponent(t.nct_id)+'" target="_blank" class="btn btn-outline btn-sm" style="font-size:.72rem"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>'
-        +'</div></div>'+ir+er+rr+'</div>';
-    }).join('');
-    container.insertAdjacentHTML('beforeend',
-      '<div class="data-card fade-in-up">'
-      +'<div class="d-flex align-items-center justify-content-between mb-3 flex-wrap gap-2">'
-      +'<div><p class="fw-semibold mb-0">'+escHtml(patientName)+'</p>'
-      +'<p style="color:var(--muted-fg);font-size:.78rem;margin:0">'+data.trials_fetched+' trials scanned &middot; '+eLabel+'</p>'
-      +'</div></div>'+cards+'</div>');
-  }
-
-  function renderMatchError(name,msg){document.getElementById('match-results').insertAdjacentHTML('beforeend','<div class="auth-alert error fade-in-up"><i class="bi bi-exclamation-circle-fill" style="flex-shrink:0;margin-top:1px"></i><span><strong>'+escHtml(name)+':</strong> '+escHtml(msg)+'</span></div>');}
-
-  function setMatchLoading(on,text){
-    var hasRes=document.getElementById('match-results').innerHTML.trim()!=='';
-    document.getElementById('match-loading').style.display=on?'':'none';
-    document.getElementById('match-idle').style.display=(on||hasRes)?'none':'';
-    document.getElementById('match-error').style.display='none';
-    if(text) document.getElementById('match-loading-text').textContent=text;
-    if(on){document.getElementById('match-progress-bar').style.width='0%';document.getElementById('match-progress-text').textContent='';}
-  }
-
-  function showMatchError(msg){
-    document.getElementById('match-error').style.display='';
-    document.getElementById('match-error-text').textContent=msg;
-    document.getElementById('match-loading').style.display='none';
-    document.getElementById('match-idle').style.display='none';
-  }
-
-  // ── Chatbot ────────────────────────────────────────────────────────────────
-  // sendCopilot defined above — Gemini-powered
-
-  function copilotReply(q){
-    if(q.match(/list.*patient|show.*patient|all patient|my patient/)){var pc=(typeof allPatients!=='undefined')?allPatients.length:0;if(!pc)return 'No patients found. Go to <strong>Patients</strong> tab and click <strong>+ Add Patient</strong>.';return 'You have <strong>'+pc+' patient(s)</strong>:<br>'+allPatients.map(function(p){return '&bull; <strong>'+escHtml(p.name)+'</strong> &mdash; '+escHtml(p.cancer_type)+(p.stage?', '+escHtml(p.stage):'');}).join('<br>');}
-    if(q.match(/how many|count|total|stats|summary/)){var pc2=(typeof allPatients!=='undefined')?allPatients.length:0;var tc=(typeof allTrials!=='undefined')?allTrials.length:0;return '<strong>App Summary</strong><br>Patients: <strong>'+pc2+'</strong><br>Trials loaded: <strong>'+tc+'</strong>';}
-    if(q.match(/go.*match|open.*match|run.*match|start.*match|match.*all/)){switchTab('matches');setTimeout(function(){runAllMatches(null);},300);return 'Opening <strong>Matches</strong> tab and running AI matching...';}
-    if(q.match(/go.*patient|open.*patient/)){switchTab('patients');return 'Opening <strong>Patients</strong> tab!';}
-    if(q.match(/go.*trial|open.*trial/)){switchTab('trials');return 'Opening <strong>Trials</strong> tab!';}
-    if(q.match(/go.*dashboard|open.*dashboard/)){switchTab('dashboard');return 'Opening <strong>Dashboard</strong>!';}
-    if(q.match(/fetch.*trial|load.*trial|get.*trial/)){switchTab('trials');setTimeout(loadLiveTrials,300);return 'Fetching live trials from ClinicalTrials.gov...';}
-    if(q.match(/add.*patient|new.*patient|how.*add.*patient/))return 'Click <strong>Patients</strong> in the sidebar, then <strong>+ Add Patient</strong>. Fill in cancer type, stage, ECOG, biomarkers, and notes.';
-    if(q.match(/match.*score|score.*mean|percentage|how.*scored/))return 'Match scores (0-100%) show keyword overlap between the patient profile and trial eligibility criteria. <strong>75%+</strong> = strong match (green), <strong>50-74%</strong> = moderate, <strong>below 50%</strong> = weak.';
-    if(q.match(/low.*score|improve.*score/))return 'Low scores usually mean the patient profile lacks detail. Add more to <strong>Diagnosis Description</strong> and <strong>Notes</strong> — include biomarkers, prior treatments, and specific clinical terms.';
-    if(q.match(/ecog/))return '<strong>ECOG</strong>: 0 = fully active, 1 = restricted but ambulatory, 2 = unable to work. Most trials require ECOG 0-1.';
-    if(q.match(/brca|biomarker|mutation|egfr|her2/))return 'Biomarkers like <strong>BRCA1/2, EGFR, HER2, PD-L1, KRAS</strong> are critical for matching. Add them in the Biomarkers section of the patient form.';
-    if(q.match(/how.*ai.*work|ai.*matching|tfidf/))return 'ClinOS uses <strong>TF-IDF</strong> keyword scoring. Patient profile and trial eligibility criteria are converted to word vectors and compared. Rare clinical terms score higher.';
-    if(q.match(/nct/))return '<strong>NCT ID</strong> is the unique identifier for every trial on ClinicalTrials.gov. Click the View button on any match result to open the full trial.';
-    if(q.match(/help|what.*do|commands/))return 'I can help with:<br>&bull; <strong>List my patients</strong><br>&bull; <strong>App stats</strong><br>&bull; <strong>Run matching</strong><br>&bull; <strong>Go to trials</strong><br>&bull; <strong>Explain match score</strong><br>&bull; <strong>How to add a patient</strong>';
-    return 'I can only help with ClinOS TrialMatch features. Try asking about patients, trials, match scores, or how to use the app. Type <strong>help</strong> to see what I can answer.';
-  }
-
-  // ── Tab hooks ──────────────────────────────────────────────────────────────
-  var _finalSwitch = switchTab;
-  switchTab = function(tab){
-    _finalSwitch(tab);
-    // Update sidebar active state
-    document.querySelectorAll('.nav-item').forEach(function(el){el.classList.remove('active');});
-    var navEl = document.getElementById('nav-'+tab);
-    if(navEl) navEl.classList.add('active');
-  };
-
-
-
-  // ── PATIENT PORTAL ────────────────────────────────────────────────────────
-
-  function isPatientRole() {
-    return currentDoctor && (currentDoctor.role || '').toLowerCase() === 'patient';
-  }
-
-  function initPatientPortal() {
-    if (!isPatientRole()) return;
-
-    // Hide doctor-only nav items
-    document.getElementById('nav-patients') && (document.getElementById('nav-patients').style.display = 'none');
-    document.getElementById('nav-trials')   && (document.getElementById('nav-trials').style.display   = 'none');
-    document.getElementById('nav-matches')  && (document.getElementById('nav-matches').style.display  = 'none');
-    document.getElementById('nav-dashboard') && (document.getElementById('nav-dashboard').style.display = 'none');
-
-    // Show patient portal tab, hide others
-    switchTab('patient-portal');
-
-    // Add patient portal nav item
-    var nav = document.querySelector('.sidebar-nav');
-    if (nav && !document.getElementById('nav-patient-portal')) {
-      var li = document.createElement('a');
-      li.className = 'nav-item active';
-      li.id = 'nav-patient-portal';
-      li.onclick = function(){ switchTab('patient-portal'); };
-      li.innerHTML = '<i class="bi bi-person-check"></i><span>My Trials</span>';
-      nav.insertBefore(li, nav.firstChild);
-    }
-
-    // Load patient profile
-    loadPatientPortal();
-    switchTab('patient-portal');
-  }
 
   async function loadPatientPortal() {
     try {

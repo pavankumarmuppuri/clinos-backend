@@ -320,8 +320,8 @@ def _match_tfidf(patient_text: str, trials: list[dict], top_k: int) -> list[dict
 
 
 async def claude_rerank(patient_text: str, candidates: list[dict]) -> list[dict]:
-    # Backend reranking disabled — frontend calls Gemini directly to avoid 429 conflicts
-    # Anthropic key reranking still available as fallback
+    if GOOGLE_KEY:
+        return await _gemini_rerank(patient_text, candidates)
     if ANTHROPIC_KEY:
         return await _claude_rerank(patient_text, candidates)
     return candidates
