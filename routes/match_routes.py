@@ -25,7 +25,7 @@ ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL_NAME    = os.getenv("CLINOS_MODEL", "neuml/pubmedbert-base-embeddings")
 CTGOV_BASE    = "https://clinicaltrials.gov/api/v2/studies"
 
-GOOGLE_KEY = "AIzaSyCFwHPdH8aM36iLKyBNOO0-2qjFTpeDpHc"  # hardcoded — backend rerank
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY", "")  # hardcoded — backend rerank
 
 _embedder = None
 

@@ -2253,6 +2253,95 @@ h1,h2,h3,h4,h5,h6{font-weight:600;letter-spacing:-.025em}
 
     function quickMatchPatient(pid,pname,btn){switchTab('matches');setTimeout(function(){runSingleMatch(pid,pname,null);},200);}
 
+
+  function renderMatchCard(data, patientName) {
+    console.log("renderMatchCard called:", patientName, data && data.top_matches && data.top_matches.length);
+
+    // Store eligible match count for patient cards
+    if (data.patient_id) {
+      var eligCount = (data.top_matches || []).filter(function(t) {
+        return !t.claude_verdict || t.claude_verdict !== 'INELIGIBLE';
+      }).length;
+      patientMatchMap[data.patient_id] = { count: eligCount };
+      if (typeof allPatients !== 'undefined' && allPatients.length) renderPatients(allPatients);
+    }
+
+    var container = document.getElementById('match-results');
+    document.getElementById('match-idle').style.display = 'none';
+
+    if (!data.top_matches || !data.top_matches.length) {
+      container.insertAdjacentHTML('beforeend',
+        '<div class="data-card fade-in-up">'
+        + '<p class="fw-semibold mb-1">' + escHtml(patientName) + '</p>'
+        + '<p style="color:var(--muted-fg);font-size:.825rem;margin:0">'
+        + '<i class="bi bi-info-circle me-1"></i>No matching trials found.</p></div>');
+      return;
+    }
+
+    var eLabel = {
+      'tfidf':          '<span class="status-badge badge-muted">TF-IDF</span>',
+      'embedding':      '<span class="status-badge badge-info">PubMedBERT</span>',
+      'claude+embedding': '<span class="status-badge badge-success">Claude</span>',
+      'gemini+tfidf':   '<span class="status-badge badge-success">Gemini AI</span>',
+    }[data.engine_used] || '<span class="status-badge badge-muted">' + escHtml(data.engine_used || 'AI') + '</span>';
+
+    var cards = data.top_matches.map(function(t) {
+      var pct = t.eligibility_pct || 0;
+      var sc  = pct >= 75 ? 'score-high' : pct >= 50 ? 'score-medium' : 'score-low';
+      var vb  = {
+        'ELIGIBLE':           '<span class="status-badge badge-success">Eligible</span>',
+        'POTENTIALLY ELIGIBLE': '<span class="status-badge badge-warning">Potentially Eligible</span>',
+        'INELIGIBLE':         '<span class="status-badge badge-error">Ineligible</span>',
+      }[t.claude_verdict || ''] || '';
+
+      var ir = (t.inclusion_met || []).map(function(c) {
+        return '<div class="criterion-row"><i class="bi bi-check-circle-fill crit-pass me-1"></i>'
+          + '<span style="font-size:.8rem">' + escHtml(c) + '</span></div>';
+      }).join('');
+
+      var er = (t.exclusions_triggered || []).map(function(c) {
+        return '<div class="criterion-row"><i class="bi bi-x-circle-fill crit-fail me-1"></i>'
+          + '<span style="font-size:.8rem">' + escHtml(c) + '</span></div>';
+      }).join('');
+
+      var rr = t.claude_reasoning
+        ? '<div style="background:rgba(13,127,163,.06);border:1px solid rgba(13,127,163,.15);'
+          + 'border-radius:10px;padding:.65rem .875rem;margin-top:.5rem;display:flex;align-items:flex-start;gap:.5rem">'
+          + '<i class="bi bi-robot" style="color:var(--primary);font-size:.9rem;flex-shrink:0;margin-top:2px"></i>'
+          + '<div><p style="font-size:.72rem;font-weight:600;color:var(--primary);margin:0 0 .15rem">AI Reasoning</p>'
+          + '<p style="font-size:.8rem;color:var(--muted-fg);margin:0;line-height:1.5">' + escHtml(t.claude_reasoning) + '</p>'
+          + '</div></div>'
+        : '';
+
+      return '<div class="data-card fade-in-up mb-3">'
+        + '<div class="d-flex align-items-start gap-3 mb-2">'
+        + '<div class="score-circle ' + sc + '" style="width:52px;height:52px;font-size:.875rem;flex-shrink:0">' + pct + '%</div>'
+        + '<div class="flex-1 min-w-0">'
+        + '<div class="d-flex align-items-center gap-2 flex-wrap mb-1">' + vb + '</div>'
+        + '<p class="fw-semibold mb-0" style="font-size:.9rem">' + escHtml(t.title) + '</p>'
+        + '<p style="color:var(--muted-fg);font-size:.78rem;margin:.1rem 0 0">' + escHtml(t.nct_id) + '</p>'
+        + '</div>'
+        + '<a href="https://clinicaltrials.gov/study/' + encodeURIComponent(t.nct_id) + '" target="_blank" '
+        + 'class="btn btn-outline px-3 py-1 flex-shrink-0" style="font-size:.75rem">'
+        + '<i class="bi bi-box-arrow-up-right me-1"></i>View</a>'
+        + '</div>'
+        + ((ir || er) ? '<div class="pt-2 mt-1" style="border-top:1px solid var(--border)">' + ir + er + '</div>' : '')
+        + rr
+        + '</div>';
+    }).join('');
+
+    container.insertAdjacentHTML('beforeend',
+      '<div class="mb-4">'
+      + '<div class="d-flex align-items-center justify-content-between mb-3">'
+      + '<div><p class="fw-bold mb-0">' + escHtml(patientName) + '</p>'
+      + '<p style="color:var(--muted-fg);font-size:.8rem;margin:0">'
+      + data.top_matches.length + ' match' + (data.top_matches.length !== 1 ? 'es' : '')
+      + ' · ' + escHtml(data.trials_fetched || 0) + ' trials scanned</p></div>'
+      + eLabel + '</div>'
+      + cards
+      + '</div>');
+  }
+
   function setMatchLoading(on, msg) {
     var loading = document.getElementById('match-loading');
     var idle    = document.getElementById('match-idle');
