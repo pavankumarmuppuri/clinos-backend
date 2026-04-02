@@ -13,12 +13,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 import os
 
+from fastapi.security import HTTPBearer
+
+security = HTTPBearer()
+
 app = FastAPI(
     title="ClinOS TrialMatch API",
     description="AI-powered oncology clinical trial matching platform.",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 app.add_middleware(
