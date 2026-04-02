@@ -3,7 +3,7 @@ from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 
 # ── Firebase Init (centralized) ──────────────────────────────────────────────
@@ -19,7 +19,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440
 
 # ── Password Hashing ─────────────────────────────────────────────────────────
 pwd_context   = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+oauth2_scheme = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
@@ -58,7 +58,8 @@ def auth_error(http_status: int, error: str, message: str) -> HTTPException:
 
 
 # ── Dependency: get current user from Firebase "users" collection ────────────
-async def get_current_doctor(token: str = Depends(oauth2_scheme)) -> dict:
+async def get_current_doctor(credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)) -> dict:
+    token = credentials.credentials
     payload, reason = decode_access_token(token)
 
     if payload is None:
