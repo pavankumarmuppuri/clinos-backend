@@ -14,6 +14,8 @@ from pydantic import BaseModel
 import firebase_config
 from firebase_admin import firestore
 from auth import get_current_doctor
+from dotenv import load_dotenv
+load_dotenv()
 
 logger      = logging.getLogger(__name__)
 router      = APIRouter(prefix="/api/match", tags=["AI Matching"])
@@ -24,8 +26,7 @@ ENGINE        = os.getenv("CLINOS_ENGINE", "tfidf")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL_NAME    = os.getenv("CLINOS_MODEL", "neuml/pubmedbert-base-embeddings")
 CTGOV_BASE    = "https://clinicaltrials.gov/api/v2/studies"
-
-GOOGLE_KEY = os.getenv("GOOGLE_API_KEY", "")  # hardcoded — backend rerank
+GOOGLE_KEY    = os.getenv("GOOGLE_API_KEY", "")
 
 _embedder = None
 
@@ -129,7 +130,7 @@ async def engine_status():
         "engine":           "embedding" if embedder else "tfidf-fallback",
         "embedding_model":  MODEL_NAME if embedder else None,
         "claude_reranking": rerank,
-        "rerank_provider":  "Gemini 2.5 Flash" if GOOGLE_KEY else ("Claude Sonnet" if ANTHROPIC_KEY else "none"),
+        "rerank_provider":  "Gemini 2.5 Flash" if GOOGLE_KEY else ("Claude Sonnet" if ANTHROPIC_KEY else "none — set GOOGLE_API_KEY"),
     }
 
 
@@ -139,10 +140,12 @@ async def score_trials(payload: ScoreRequest, current_user=Depends(get_current_d
         return MatchResponse(patient_id=payload.patient_id, patient_name=payload.patient_name,
                              engine_used="none", trials_fetched=0, top_matches=[])
 
-    cancer, stage, ecog, bm, notes = (
-        payload.cancer_type or "cancer", payload.stage or "",
-        payload.ecog or "", payload.biomarkers or "", payload.notes or ""
-    )
+    cancer = payload.cancer_type or "cancer"
+    stage  = payload.stage or ""
+    ecog   = payload.ecog or ""
+    bm     = payload.biomarkers or ""
+    notes  = payload.notes or ""
+
     patient_text = (
         f"Patient diagnosis: {cancer} {stage}. Cancer type: {cancer}. "
         f"ECOG performance status: {ecog}. Biomarkers: {bm}. "
@@ -194,12 +197,18 @@ async def chat(payload: ChatRequest, current_user=Depends(get_current_doctor)):
                     "role":  "user" if m.role == "user" else "model",
                     "parts": [{"text": m.content}],
                 })
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={GOOGLE_KEY}"
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"gemini-2.5-flash-lite:generateContent?key={GOOGLE_KEY}"
+            )
             async with httpx.AsyncClient(timeout=25.0) as client:
                 resp = await client.post(url, json={
                     "contents": full_contents,
-                    "generationConfig": {"temperature": 0.7, "maxOutputTokens": 600,
-                                         "thinkingConfig": {"thinkingBudget": 0}},
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 600,
+                        "thinkingConfig": {"thinkingBudget": 0},
+                    },
                 })
                 resp.raise_for_status()
                 data = resp.json()
@@ -219,6 +228,8 @@ async def chat(payload: ChatRequest, current_user=Depends(get_current_doctor)):
             return ChatResponse(reply=message.content[0].text)
         except Exception as exc:
             return ChatResponse(reply=f"Chat error: {str(exc)}")
+
+    return ChatResponse(reply="No AI provider configured.")
 
 
 @router.post("/adhoc", response_model=MatchResponse)
@@ -270,7 +281,11 @@ def patient_to_text(p: dict) -> str:
     labs       = "; ".join(f"{k}: {v}" for k, v in p.get("lab_values", {}).items())
     prior      = "; ".join(p.get("prior_treatments", [])) or "None"
     note       = p.get("prior_treatment_note", "")
-    text = f"{p['name']} is a {p.get('age',0)}-year-old {(p.get('sex') or 'unknown').lower()} with diagnosis: {conditions}. Prior treatments: {prior}. "
+    text = (
+        f"{p['name']} is a {p.get('age', 0)}-year-old "
+        f"{(p.get('sex') or 'unknown').lower()} with diagnosis: {conditions}. "
+        f"Prior treatments: {prior}. "
+    )
     if note: text += f"Clinical context: {note}. "
     if meds: text += f"Current medications: {meds}. "
     if labs: text += f"Lab values: {labs}."
@@ -279,13 +294,15 @@ def patient_to_text(p: dict) -> str:
 
 def _tfidf_score_to_pct(score: float) -> int:
     floor, ceiling = 0.01, 0.10
-    if score <= floor: return 0
+    if score <= floor:
+        return 0
     return int(max(0, min(100, round((score - floor) / (ceiling - floor) * 100))))
 
 
 def _embedding_score_to_pct(score: float) -> int:
     floor, ceiling = 0.50, 0.92
-    if score <= floor: return 0
+    if score <= floor:
+        return 0
     return int(max(0, min(100, round((score - floor) / (ceiling - floor) * 100))))
 
 
@@ -294,27 +311,38 @@ def match_with_embeddings(patient_text: str, trials: list[dict], top_k: int = 5)
     if embedder is None:
         return _match_tfidf(patient_text, trials, top_k)
     all_texts  = [patient_text] + [t["combined_text"] for t in trials]
-    embeddings = embedder.encode(all_texts, batch_size=32, show_progress_bar=False,
-                                  convert_to_numpy=True, normalize_embeddings=True)
+    embeddings = embedder.encode(
+        all_texts, batch_size=32, show_progress_bar=False,
+        convert_to_numpy=True, normalize_embeddings=True,
+    )
     raw_scores = embeddings[1:] @ embeddings[0]
-    results    = [{**t, "eligibility_pct": _embedding_score_to_pct(float(raw_scores[i])),
-                   "raw_similarity": round(float(raw_scores[i]), 4), "engine": "embedding"}
-                  for i, t in enumerate(trials)]
+    results    = [
+        {**t,
+         "eligibility_pct": _embedding_score_to_pct(float(raw_scores[i])),
+         "raw_similarity":  round(float(raw_scores[i]), 4),
+         "engine":          "embedding"}
+        for i, t in enumerate(trials)
+    ]
     results.sort(key=lambda x: x["eligibility_pct"], reverse=True)
     return results[:top_k]
 
 
 def _match_tfidf(patient_text: str, trials: list[dict], top_k: int) -> list[dict]:
-    if not trials: return []
+    if not trials:
+        return []
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity as sk_cos
     all_texts  = [patient_text] + [t["combined_text"] for t in trials]
     vec        = TfidfVectorizer(stop_words="english", ngram_range=(1, 2), sublinear_tf=True)
     matrix     = vec.fit_transform(all_texts)
     raw_scores = sk_cos(matrix[0], matrix[1:]).flatten()
-    results    = [{**t, "eligibility_pct": _tfidf_score_to_pct(float(raw_scores[i])),
-                   "raw_similarity": round(float(raw_scores[i]), 4), "engine": "tfidf"}
-                  for i, t in enumerate(trials)]
+    results    = [
+        {**t,
+         "eligibility_pct": _tfidf_score_to_pct(float(raw_scores[i])),
+         "raw_similarity":  round(float(raw_scores[i]), 4),
+         "engine":          "tfidf"}
+        for i, t in enumerate(trials)
+    ]
     results.sort(key=lambda x: x["eligibility_pct"], reverse=True)
     return results[:top_k]
 
@@ -329,38 +357,51 @@ async def claude_rerank(patient_text: str, candidates: list[dict]) -> list[dict]
 
 async def _gemini_rerank(patient_text: str, candidates: list[dict]) -> list[dict]:
     trials_text = "\n\n".join(
-        f"[{t['nct_id']}] {t['title']}\nINCLUSION: {t['inclusion'][:400]}\nEXCLUSION: {t['exclusion'][:250]}"
+        f"[{t['nct_id']}] {t['title']}\n"
+        f"INCLUSION: {t['inclusion'][:400]}\n"
+        f"EXCLUSION: {t['exclusion'][:250]}"
         for t in candidates
     )
     prompt = _RERANK_PROMPT.format(patient_text=patient_text, trials_text=trials_text)
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={GOOGLE_KEY}"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-2.5-flash-lite:generateContent?key={GOOGLE_KEY}"
+        )
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(url, json={
                 "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 4000,
-                                      "thinkingConfig": {"thinkingBudget": 0}},
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 4000,
+                    "thinkingConfig": {"thinkingBudget": 0},
+                },
             })
             resp.raise_for_status()
             data = resp.json()
         raw = data["candidates"][0]["content"]["parts"][0]["text"]
         raw = raw.replace("```json", "").replace("```", "").strip()
         s, e = raw.find("{"), raw.rfind("}")
-        if s > -1 and e > s: raw = raw[s:e+1]
+        if s > -1 and e > s:
+            raw = raw[s:e + 1]
         parsed   = json.loads(raw)
         rankings = {r["nct_id"]: r for r in parsed.get("rankings", [])}
         order    = {"ELIGIBLE": 0, "POTENTIALLY ELIGIBLE": 1, "INELIGIBLE": 2}
-        enriched = [{**c,
-            "claude_verdict":       rankings.get(c["nct_id"], {}).get("verdict"),
-            "claude_confidence":    rankings.get(c["nct_id"], {}).get("confidence"),
-            "inclusion_met":        rankings.get(c["nct_id"], {}).get("inclusion_met", []),
-            "exclusions_triggered": rankings.get(c["nct_id"], {}).get("exclusions_triggered", []),
-            "claude_reasoning":     rankings.get(c["nct_id"], {}).get("reasoning"),
-            "eligibility_pct":      rankings.get(c["nct_id"], {}).get("confidence", c["eligibility_pct"]),
-            "engine":               "gemini+tfidf",
-        } for c in candidates]
-        enriched.sort(key=lambda x: (order.get(x.get("claude_verdict", "INELIGIBLE"), 2),
-                                      -x["eligibility_pct"]))
+        enriched = [
+            {**c,
+             "claude_verdict":       rankings.get(c["nct_id"], {}).get("verdict"),
+             "claude_confidence":    rankings.get(c["nct_id"], {}).get("confidence"),
+             "inclusion_met":        rankings.get(c["nct_id"], {}).get("inclusion_met", []),
+             "exclusions_triggered": rankings.get(c["nct_id"], {}).get("exclusions_triggered", []),
+             "claude_reasoning":     rankings.get(c["nct_id"], {}).get("reasoning"),
+             "eligibility_pct":      rankings.get(c["nct_id"], {}).get("confidence", c["eligibility_pct"]),
+             "engine":               "gemini+tfidf"}
+            for c in candidates
+        ]
+        enriched.sort(key=lambda x: (
+            order.get(x.get("claude_verdict", "INELIGIBLE"), 2),
+            -x["eligibility_pct"],
+        ))
         logger.info("Gemini re-ranking complete for %d candidates", len(enriched))
         return enriched
     except Exception as exc:
@@ -370,7 +411,9 @@ async def _gemini_rerank(patient_text: str, candidates: list[dict]) -> list[dict
 
 async def _claude_rerank(patient_text: str, candidates: list[dict]) -> list[dict]:
     trials_text = "\n\n".join(
-        f"[{t['nct_id']}] {t['title']}\nINCLUSION: {t['inclusion'][:800]}\nEXCLUSION: {t['exclusion'][:500]}"
+        f"[{t['nct_id']}] {t['title']}\n"
+        f"INCLUSION: {t['inclusion'][:800]}\n"
+        f"EXCLUSION: {t['exclusion'][:500]}"
         for t in candidates
     )
     try:
@@ -381,21 +424,25 @@ async def _claude_rerank(patient_text: str, candidates: list[dict]) -> list[dict
             messages=[{"role": "user", "content":
                        _RERANK_PROMPT.format(patient_text=patient_text, trials_text=trials_text)}],
         )
-        raw    = message.content[0].text.replace("```json","").replace("```","").strip()
-        parsed = json.loads(raw)
+        raw      = message.content[0].text.replace("```json", "").replace("```", "").strip()
+        parsed   = json.loads(raw)
         rankings = {r["nct_id"]: r for r in parsed.get("rankings", [])}
         order    = {"ELIGIBLE": 0, "POTENTIALLY ELIGIBLE": 1, "INELIGIBLE": 2}
-        enriched = [{**c,
-            "claude_verdict":       rankings.get(c["nct_id"], {}).get("verdict"),
-            "claude_confidence":    rankings.get(c["nct_id"], {}).get("confidence"),
-            "inclusion_met":        rankings.get(c["nct_id"], {}).get("inclusion_met", []),
-            "exclusions_triggered": rankings.get(c["nct_id"], {}).get("exclusions_triggered", []),
-            "claude_reasoning":     rankings.get(c["nct_id"], {}).get("reasoning"),
-            "eligibility_pct":      rankings.get(c["nct_id"], {}).get("confidence", c["eligibility_pct"]),
-            "engine":               "claude+embedding",
-        } for c in candidates]
-        enriched.sort(key=lambda x: (order.get(x.get("claude_verdict", "INELIGIBLE"), 2),
-                                      -x["eligibility_pct"]))
+        enriched = [
+            {**c,
+             "claude_verdict":       rankings.get(c["nct_id"], {}).get("verdict"),
+             "claude_confidence":    rankings.get(c["nct_id"], {}).get("confidence"),
+             "inclusion_met":        rankings.get(c["nct_id"], {}).get("inclusion_met", []),
+             "exclusions_triggered": rankings.get(c["nct_id"], {}).get("exclusions_triggered", []),
+             "claude_reasoning":     rankings.get(c["nct_id"], {}).get("reasoning"),
+             "eligibility_pct":      rankings.get(c["nct_id"], {}).get("confidence", c["eligibility_pct"]),
+             "engine":               "claude+embedding"}
+            for c in candidates
+        ]
+        enriched.sort(key=lambda x: (
+            order.get(x.get("claude_verdict", "INELIGIBLE"), 2),
+            -x["eligibility_pct"],
+        ))
         return enriched
     except Exception as exc:
         logger.warning("Claude re-ranking failed: %s", exc)
@@ -421,12 +468,19 @@ def _build_trial_match(t: dict) -> TrialMatch:
 
 async def run_match_pipeline(patient_dict: dict, patient_id: str = "", top_k: int = 3) -> MatchResponse:
     query  = patient_dict.get("conditions", ["cancer"])[0]
-    params = {"query.cond": query, "filter.overallStatus": "RECRUITING",
-              "pageSize": 25, "fields": "NCTId,BriefTitle,EligibilityModule", "format": "json"}
+    params = {
+        "query.cond":           query,
+        "filter.overallStatus": "RECRUITING",
+        "pageSize":             25,
+        "fields":               "NCTId,BriefTitle,EligibilityModule",
+        "format":               "json",
+    }
     trials = []
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True,
-                                      headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"}) as client:
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        ) as client:
             resp = await client.get(CTGOV_BASE, params=params)
             resp.raise_for_status()
             data = resp.json()
@@ -438,10 +492,11 @@ async def run_match_pipeline(patient_dict: dict, patient_id: str = "", top_k: in
                 nct_id   = id_mod.get("nctId", "N/A")
                 title    = id_mod.get("briefTitle", "").strip()
                 raw_crit = elig.get("eligibilityCriteria", "")
-                if not raw_crit or len(raw_crit) < 300: continue
-                lower    = raw_crit.lower()
-                inc_s    = next((lower.find(m) for m in ["inclusion criteria","inclusion:"] if m in lower), -1)
-                exc_s    = next((lower.find(m) for m in ["exclusion criteria","exclusion:"] if m in lower), -1)
+                if not raw_crit or len(raw_crit) < 300:
+                    continue
+                lower = raw_crit.lower()
+                inc_s = next((lower.find(m) for m in ["inclusion criteria", "inclusion:"] if m in lower), -1)
+                exc_s = next((lower.find(m) for m in ["exclusion criteria", "exclusion:"] if m in lower), -1)
                 if inc_s != -1 and exc_s != -1:
                     inc = (raw_crit[inc_s:exc_s] if inc_s < exc_s else raw_crit[inc_s:]).strip()
                     exc = (raw_crit[exc_s:] if inc_s < exc_s else raw_crit[exc_s:inc_s]).strip()
@@ -449,9 +504,13 @@ async def run_match_pipeline(patient_dict: dict, patient_id: str = "", top_k: in
                     inc, exc = raw_crit[inc_s:].strip(), ""
                 else:
                     inc, exc = raw_crit.strip(), ""
-                trials.append({"nct_id": nct_id, "title": title, "inclusion": inc, "exclusion": exc,
-                               "combined_text": f"Trial: {title}. Inclusion: {inc} Exclusion: {exc}"})
-            except Exception: continue
+                trials.append({
+                    "nct_id": nct_id, "title": title,
+                    "inclusion": inc, "exclusion": exc,
+                    "combined_text": f"Trial: {title}. Inclusion: {inc} Exclusion: {exc}",
+                })
+            except Exception:
+                continue
     except Exception as exc:
         logger.warning("ClinicalTrials.gov fetch failed: %s", exc)
 
